@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/proxy-wasm/proxy-wasm-go-sdk/proxywasm"
 	"github.com/proxy-wasm/proxy-wasm-go-sdk/proxywasm/types"
 )
@@ -8,74 +13,146 @@ import (
 func main() {}
 
 func init() {
-	// Set the VM context to a new instance of the vmContext struct
 	proxywasm.SetVMContext(&vmContext{})
 }
 
-// The vmContext struct represents the VM context
 type vmContext struct {
-	// Embed the DefaultVMContext type from the proxywasm/types package
 	types.DefaultVMContext
 }
 
-// The NewPluginContext function is called when a new plugin context is created
-func (*vmContext) NewPluginContext(contextID uint32) types.PluginContext {
-	// Return a new instance of the pluginContext struct with the given contextID
-	return &pluginContext{contextID: contextID}
+func (*vmContext) NewPluginContext(uint32) types.PluginContext {
+	return &pluginContext{}
 }
 
-// The pluginContext struct represents the plugin context
 type pluginContext struct {
-	// Embed the DefaultPluginContext type from the proxywasm/types package
 	types.DefaultPluginContext
-	conf      string
-	contextID uint32
+	allowed map[string]struct{}
 }
 
-// The OnPluginStart function is called when the plugin is started
-func (ctx *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
-	// Get the plugin configuration data
+func (ctx *pluginContext) OnPluginStart(int) types.OnPluginStartStatus {
 	data, err := proxywasm.GetPluginConfiguration()
 	if err != nil {
-		// Log a critical error if there's an error reading the configuration
-		proxywasm.LogCriticalf("error reading plugin configuration: %v", err)
+		proxywasm.LogCriticalf("query-param-filter: read configuration: %v", err)
 		return types.OnPluginStartStatusFailed
 	}
-	// Store the configuration data in the conf field
-	ctx.conf = string(data)
-	// Return a successful status
+
+	ctx.allowed, err = parseAllowlist(data)
+	if err != nil {
+		proxywasm.LogCriticalf("query-param-filter: invalid configuration: %v", err)
+		return types.OnPluginStartStatusFailed
+	}
 	return types.OnPluginStartStatusOK
 }
 
-// The OnPluginDone function is called when the plugin is done
-func (ctx *pluginContext) OnPluginDone() bool {
-	proxywasm.LogInfo("do clean up...")
-	return true
+func parseAllowlist(data []byte) (map[string]struct{}, error) {
+	var values []any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, fmt.Errorf("expected a JSON array of strings: %w", err)
+	}
+	if values == nil {
+		return nil, errors.New("expected a JSON array of strings, not null")
+	}
+
+	allowed := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		name, ok := value.(string)
+		if !ok {
+			return nil, errors.New("query parameter names must be strings")
+		}
+		allowed[name] = struct{}{}
+	}
+	return allowed, nil
 }
 
-// The NewHttpContext function is called when a new HTTP context is created
-func (ctx *pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
-	// Return a new instance of the httpLifecycle struct with the given contextID and conf
-	return &httpLifecycle{
-		pluginCtxID: ctx.contextID,
-		conf:        ctx.conf,
-		contextID:   contextID,
+func (ctx *pluginContext) NewHttpContext(uint32) types.HttpContext {
+	return &httpContext{allowed: ctx.allowed}
+}
+
+type httpContext struct {
+	types.DefaultHttpContext
+	allowed map[string]struct{}
+}
+
+func (ctx *httpContext) OnHttpRequestHeaders(int, bool) types.Action {
+	args, err := proxywasm.GetProperty([]string{"args"})
+	if errors.Is(err, types.ErrorStatusNotFound) {
+		return types.ActionContinue
+	}
+	if err != nil {
+		return failRequest(500, "read query arguments", err)
+	}
+
+	filtered := filterQuery(string(args), ctx.allowed)
+	if filtered == string(args) {
+		return types.ActionContinue
+	}
+
+	if filtered == "" {
+		err = clearQueryArgs()
+	} else {
+		err = proxywasm.SetProperty([]string{"args"}, []byte(filtered))
+	}
+	if err != nil {
+		return failRequest(500, "set query arguments", err)
+	}
+	return types.ActionContinue
+}
+
+func filterQuery(query string, allowed map[string]struct{}) string {
+	var kept []string
+	for _, part := range strings.Split(query, "&") {
+		if part == "" {
+			continue
+		}
+		key, _, _ := strings.Cut(part, "=")
+		name := decodeQueryName(key)
+		if _, ok := allowed[name]; ok && name != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "&")
+}
+
+func decodeQueryName(key string) string {
+	var decoded strings.Builder
+	decoded.Grow(len(key))
+	for i := 0; i < len(key); i++ {
+		if key[i] == '%' && i+2 < len(key) {
+			high, highOK := hexValue(key[i+1])
+			low, lowOK := hexValue(key[i+2])
+			if highOK && lowOK {
+				decoded.WriteByte(high<<4 | low)
+				i += 2
+				continue
+			}
+		}
+		if key[i] == '+' {
+			decoded.WriteByte(' ')
+		} else {
+			decoded.WriteByte(key[i])
+		}
+	}
+	return decoded.String()
+}
+
+func hexValue(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
 	}
 }
 
-// The httpLifecycle struct represents the HTTP lifecycle
-type httpLifecycle struct {
-	// Embed the DefaultHttpContext type from the proxywasm/types package
-	types.DefaultHttpContext
-	pluginCtxID uint32
-	contextID   uint32
-	conf        string
-}
-
-// The OnHttpRequestHeaders function is called when HTTP request headers are received
-func (ctx *httpLifecycle) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
-	// Log a warning message with the plugin context ID, configuration, and HTTP context ID
-	proxywasm.LogWarnf("run plugin ctx %d with conf %s in http ctx %d", ctx.pluginCtxID, ctx.conf, ctx.contextID)
-	// Return an action to continue processing the request
-	return types.ActionContinue
+func failRequest(status uint32, operation string, err error) types.Action {
+	proxywasm.LogErrorf("query-param-filter: %s: %v", operation, err)
+	if err := proxywasm.SendHttpResponse(status, nil, nil, -1); err != nil {
+		proxywasm.LogErrorf("query-param-filter: send error response: %v", err)
+		panic("query-param-filter: failed to send error response")
+	}
+	return types.ActionPause
 }
