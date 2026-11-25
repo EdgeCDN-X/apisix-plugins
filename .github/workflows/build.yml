@@ -54,10 +54,6 @@ jobs:
           go-version-file: plugins/wasm/query-param-filter/go.mod
           cache: false
 
-      - uses: acifani/setup-tinygo@v3
-        with:
-          tinygo-version: '0.40.1'
-
       - name: Build WASM plugins
         run: make
 

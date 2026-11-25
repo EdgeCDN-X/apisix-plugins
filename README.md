@@ -1,8 +1,7 @@
 # APISIX plugins
 
-Install Go, TinyGo 0.40.1, and Binaryen (`wasm-opt`), then run `make` to
-build the WASM plugins. The build uses TinyGo's `wasi-legacy` mode so APISIX
-can initialize the plugins without terminating them.
+Install Go 1.25 or later, then run `make` to build the WASM plugins as WASI
+reactors using the standard Go compiler.
 
 GitHub Actions builds and pushes `fr6nco/apisix` when `main` or a Git tag is
 pushed. Native AMD64 and ARM64 runners build the images, which are published
