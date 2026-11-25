@@ -2,4 +2,4 @@ module query-param-filter
 
 go 1.25.0
 
-require github.com/proxy-wasm/proxy-wasm-go-sdk v0.0.0-20260105142703-44c7d5847745
+require github.com/tetratelabs/proxy-wasm-go-sdk v0.24.0

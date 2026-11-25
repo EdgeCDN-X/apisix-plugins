@@ -7,5 +7,5 @@ all: $(WASM_DIRS)
 
 ifneq ($(strip $(WASM_DIRS)),)
 $(WASM_DIRS):
-	cd "$@" && env GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o "$(notdir $@).wasm" main.go
+	cd "$@" && tinygo build -o "$(notdir $@).wasm" -scheduler=none -target=wasi ./main.go
 endif
